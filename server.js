@@ -6,11 +6,13 @@ const WebSocket = require("ws");
 
 const PORT = process.env.PORT || 3000;
 const CLOUD_MODE = /^true|1|yes$/i.test(process.env.CLOUD_MODE || "true");
+const DEFAULT_OFFICIAL_OPENCLAW_URL =
+  "https://clawdbot-railway-template-production-0667.up.railway.app";
 const OFFICIAL_OPENCLAW_URL = normalizeOfficialOpenClawURL(
   process.env.OPENCLAW_GATEWAY_URL ||
     process.env.REAL_OPENCLAW_URL ||
     process.env.OFFICIAL_OPENCLAW_URL ||
-    ""
+    DEFAULT_OFFICIAL_OPENCLAW_URL
 );
 const OFFICIAL_OPENCLAW_TOKEN =
   process.env.OPENCLAW_GATEWAY_TOKEN ||
@@ -185,6 +187,39 @@ app.get("/", (req, res) => {
     officialOpenClawModel: officialOpenClawConfigured() ? OFFICIAL_OPENCLAW_MODEL : null,
     cloudMode: CLOUD_MODE,
   });
+});
+
+app.get("/api/openclaw/health", async (req, res) => {
+  if (!OFFICIAL_OPENCLAW_URL) {
+    return res.status(503).json({
+      ok: false,
+      configured: false,
+      message: "Official OpenClaw URL is not configured.",
+    });
+  }
+
+  try {
+    const response = await fetch(`${OFFICIAL_OPENCLAW_URL}/healthz`, {
+      headers: OFFICIAL_OPENCLAW_TOKEN
+        ? { Authorization: `Bearer ${OFFICIAL_OPENCLAW_TOKEN}` }
+        : {},
+    });
+    const text = await response.text();
+    res.status(response.ok ? 200 : 502).json({
+      ok: response.ok,
+      configured: officialOpenClawConfigured(),
+      url: OFFICIAL_OPENCLAW_URL,
+      status: response.status,
+      body: text.slice(0, 500),
+    });
+  } catch (error) {
+    res.status(502).json({
+      ok: false,
+      configured: officialOpenClawConfigured(),
+      url: OFFICIAL_OPENCLAW_URL,
+      message: String(error.message || error),
+    });
+  }
 });
 
 app.post("/api/chat", async (req, res) => {
