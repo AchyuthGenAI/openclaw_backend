@@ -487,6 +487,22 @@ function fallbackPlan(content) {
   const text = content.trim();
   const lower = text.toLowerCase();
 
+  const calendarMatch = lower.match(/\b(calendar|schedule|events?|appointments?|agenda)\b/);
+  if (calendarMatch && /\b(check|show|list|get|what|today|tomorrow|upcoming|next)\b/.test(lower)) {
+    return plan("I will check your calendar.", "get_calendar_events", {
+      days: inferDays(lower),
+    });
+  }
+
+  const reminderListMatch = lower.match(/\b(reminders?|todos?|to-dos?|tasks?)\b/);
+  if (reminderListMatch && /\b(check|show|list|get|what|pending|all)\b/.test(lower)) {
+    return plan("I will check your reminders.", "get_reminders");
+  }
+
+  if (/\bnotifications?\b/.test(lower) && /\b(check|show|list|get|read|what)\b/.test(lower)) {
+    return plan("I will check your notifications.", "read_notifications");
+  }
+
   if (/\b(battery|charge|charging)\b/.test(lower)) {
     return plan("I will check your battery.", "get_battery");
   }
@@ -515,11 +531,27 @@ function fallbackPlan(content) {
   if (/\bphoto|camera\b/.test(lower) && /\b(take|snap|open)\b/.test(lower)) {
     return plan("I will open the camera.", "take_photo");
   }
+  if (/\b(photos?|pictures?|gallery)\b/.test(lower) && /\b(show|get|latest|recent|list)\b/.test(lower)) {
+    return plan("I will get your recent photos.", "get_photos", {
+      limit: inferLimit(lower, 10),
+    });
+  }
   if (/\bscreenshot\b/.test(lower)) {
     return plan("I will capture a screenshot.", "take_screenshot");
   }
   if (/\bcontacts\b/.test(lower) && /\b(list|show|get)\b/.test(lower)) {
     return plan("I will get your contacts.", "get_contacts");
+  }
+  if (/\b(find|search)\b.*\bcontact\b/.test(lower)) {
+    const query = text.replace(/^.*?\b(?:find|search)\b/i, "").replace(/\bcontacts?\b/ig, "").trim();
+    return plan(`I will search contacts${query ? ` for ${query}` : ""}.`, "search_contacts", { query });
+  }
+
+  if (/\b(play|pause|resume|stop|next|previous|skip)\b.*\b(music|song|media|audio|video)\b/.test(lower) ||
+      /\b(music|song|media|audio|video)\b.*\b(play|pause|resume|stop|next|previous|skip)\b/.test(lower)) {
+    return plan("I will control media playback.", "control_media", {
+      action: inferMediaAction(lower),
+    });
   }
 
   const openMatch = text.match(/\bopen\s+(.+)$/i);
@@ -557,14 +589,43 @@ function fallbackPlan(content) {
     });
   }
 
+  const calendarCreateMatch = text.match(/\b(?:add|create|schedule)\s+(?:a\s+)?(?:calendar\s+)?(?:event|meeting|appointment)\s+(?:called|named|for)?\s*(.+)$/i);
+  if (calendarCreateMatch) {
+    return plan("I will create a calendar event. If the time is missing, the calendar tool may ask for more details.", "create_calendar_event", {
+      title: calendarCreateMatch[1].trim() || "New event",
+      start: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+  }
+
   return {
-    reply: "I am connected. Add OPENAI_API_KEY or GROQ_API_KEY in Railway to unlock full natural-language OpenClaw planning.",
+    reply: "I am connected, but Railway still has no AI key configured. I can run direct actions like calendar, reminders, battery, location, apps, clipboard, media, photos, contacts, messages, and calls. Add GROQ_API_KEY in Railway for full natural-language multi-step planning.",
     tools: [],
   };
 }
 
 function plan(reply, name, args = {}) {
   return { reply, tools: [{ name, arguments: args }] };
+}
+
+function inferDays(lower) {
+  if (/\btoday\b/.test(lower)) return 1;
+  if (/\btomorrow\b/.test(lower)) return 2;
+  if (/\bmonth\b/.test(lower)) return 30;
+  if (/\bweek\b/.test(lower)) return 7;
+  const match = lower.match(/\bnext\s+(\d{1,2})\s+days?\b/);
+  return match ? Math.min(60, Math.max(1, Number(match[1]))) : 7;
+}
+
+function inferLimit(lower, fallback) {
+  const match = lower.match(/\b(\d{1,2})\b/);
+  return match ? Math.min(30, Math.max(1, Number(match[1]))) : fallback;
+}
+
+function inferMediaAction(lower) {
+  if (/\b(pause|stop)\b/.test(lower)) return lower.includes("stop") ? "stop" : "pause";
+  if (/\b(next|skip)\b/.test(lower)) return "next";
+  if (/\b(previous|back)\b/.test(lower)) return "previous";
+  return "play";
 }
 
 server.listen(PORT, "0.0.0.0", () => {
