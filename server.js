@@ -6,6 +6,21 @@ const WebSocket = require("ws");
 
 const PORT = process.env.PORT || 3000;
 const CLOUD_MODE = /^true|1|yes$/i.test(process.env.CLOUD_MODE || "true");
+const OFFICIAL_OPENCLAW_URL = normalizeOfficialOpenClawURL(
+  process.env.OPENCLAW_GATEWAY_URL ||
+    process.env.REAL_OPENCLAW_URL ||
+    process.env.OFFICIAL_OPENCLAW_URL ||
+    ""
+);
+const OFFICIAL_OPENCLAW_TOKEN =
+  process.env.OPENCLAW_GATEWAY_TOKEN ||
+  process.env.REAL_OPENCLAW_TOKEN ||
+  process.env.OFFICIAL_OPENCLAW_TOKEN ||
+  "";
+const OFFICIAL_OPENCLAW_MODEL =
+  process.env.OPENCLAW_AGENT_MODEL || process.env.OFFICIAL_OPENCLAW_MODEL || "openclaw/default";
+const OFFICIAL_OPENCLAW_BACKEND_MODEL =
+  process.env.OPENCLAW_BACKEND_MODEL || process.env.OFFICIAL_OPENCLAW_BACKEND_MODEL || "";
 const MODEL =
   process.env.OPENAI_MODEL ||
   process.env.GROQ_MODEL ||
@@ -38,6 +53,21 @@ function createAIClient() {
 }
 
 const ai = createAIClient();
+
+function normalizeOfficialOpenClawURL(rawValue) {
+  let value = String(rawValue || "").trim();
+  if (!value) return "";
+  if (value.startsWith("wss://")) value = `https://${value.slice("wss://".length)}`;
+  if (value.startsWith("ws://")) value = `http://${value.slice("ws://".length)}`;
+  if (!value.startsWith("http://") && !value.startsWith("https://")) {
+    value = `https://${value}`;
+  }
+  return value.replace(/\/+$/, "");
+}
+
+function officialOpenClawConfigured() {
+  return Boolean(OFFICIAL_OPENCLAW_URL && OFFICIAL_OPENCLAW_TOKEN);
+}
 
 const SYSTEM_PROMPT = `You are AURA, a proactive OpenClaw assistant connected to the user's iPhone.
 You can chat naturally, navigate apps, run actions, and automate multi-step tasks by calling tools.
@@ -150,6 +180,9 @@ app.get("/", (req, res) => {
     websocketURL: host ? `wss://${host}` : null,
     model: MODEL,
     aiConfigured: Boolean(ai),
+    officialOpenClawConfigured: officialOpenClawConfigured(),
+    officialOpenClawURL: OFFICIAL_OPENCLAW_URL || null,
+    officialOpenClawModel: officialOpenClawConfigured() ? OFFICIAL_OPENCLAW_MODEL : null,
     cloudMode: CLOUD_MODE,
   });
 });
@@ -305,6 +338,17 @@ class AURASession {
     this.sendEvent("status", { message: "Thinking..." });
     this.history.push({ role: "user", content });
 
+    if (officialOpenClawConfigured()) {
+      try {
+        await this.processWithOfficialOpenClaw();
+        return;
+      } catch (error) {
+        this.sendEvent("status", {
+          message: `Official OpenClaw unavailable, using AURA fallback: ${String(error.message || error)}`,
+        });
+      }
+    }
+
     if (!ai) {
       await this.runFallback(content);
       return;
@@ -352,6 +396,95 @@ class AURASession {
       role: "assistant",
       content: "I ran the available steps, but the task needs more turns. Tell me to continue and I will keep going.",
     });
+  }
+
+  async processWithOfficialOpenClaw() {
+    for (let turn = 0; turn < 6; turn += 1) {
+      const completion = await this.callOfficialOpenClawChat(this.withMemory());
+      const message = completion.choices?.[0]?.message || {};
+      const toolCalls = message.tool_calls || [];
+
+      if (!toolCalls.length) {
+        const reply = message.content || "Done.";
+        this.history.push({ role: "assistant", content: reply });
+        this.sendEvent("message.complete", {
+          content: reply,
+          role: "assistant",
+          source: "official_openclaw",
+        });
+        return;
+      }
+
+      this.history.push({
+        role: "assistant",
+        content: message.content || null,
+        tool_calls: toolCalls,
+      });
+
+      for (const call of toolCalls) {
+        const name = call.function?.name || "";
+        const args = safeJSON(call.function?.arguments || "{}");
+        const result = await this.executeTool(name, args);
+        this.history.push({
+          role: "tool",
+          tool_call_id: call.id,
+          name,
+          content: result,
+        });
+      }
+    }
+
+    this.sendEvent("message.complete", {
+      role: "assistant",
+      content:
+        "Official OpenClaw ran the available steps, but the task needs more turns. Tell me to continue and I will keep going.",
+      source: "official_openclaw",
+    });
+  }
+
+  async callOfficialOpenClawChat(messages) {
+    const headers = {
+      Authorization: `Bearer ${OFFICIAL_OPENCLAW_TOKEN}`,
+      "Content-Type": "application/json",
+      "x-openclaw-session-key": `aura-${this.userId}`,
+      "x-openclaw-message-channel": "aura_ios",
+    };
+
+    if (OFFICIAL_OPENCLAW_BACKEND_MODEL) {
+      headers["x-openclaw-model"] = OFFICIAL_OPENCLAW_BACKEND_MODEL;
+    }
+
+    const response = await fetch(`${OFFICIAL_OPENCLAW_URL}/v1/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: OFFICIAL_OPENCLAW_MODEL,
+        messages,
+        tools: TOOLS,
+        tool_choice: "auto",
+        temperature: Number(process.env.TEMPERATURE || 0.7),
+        max_completion_tokens: Number(process.env.MAX_TOKENS || 1400),
+        user: this.userId,
+      }),
+    });
+
+    const text = await response.text();
+    let body = {};
+    try {
+      body = text ? JSON.parse(text) : {};
+    } catch {
+      body = { error: text };
+    }
+
+    if (!response.ok) {
+      const message =
+        body?.error?.message ||
+        body?.error ||
+        `HTTP ${response.status} from official OpenClaw`;
+      throw new Error(String(message));
+    }
+
+    return body;
   }
 
   withMemory() {
